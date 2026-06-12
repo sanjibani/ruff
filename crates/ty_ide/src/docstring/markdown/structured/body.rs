@@ -85,7 +85,7 @@ pub(super) fn parse_named_items<'a>(
             && preformatted.consume_preformatted_line(line.text)
         {
             if !line.text.trim().is_empty()
-                && item_indent.is_some_and(|indent| indentation(line.text) < indent)
+                && item_indent.is_some_and(|indent| indentation(line.text) <= indent)
             {
                 return None;
             }

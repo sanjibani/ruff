@@ -4,7 +4,10 @@ use ruff_text_size::TextRange;
 
 use super::SectionKind;
 use super::preformatted::PreformattedBlockScanner;
-use super::syntax::{ParsedLine, indentation, is_docstring_type_expression, parsed_lines};
+use super::syntax::{
+    ParsedLine, indentation, is_docstring_type_expression, parsed_lines,
+    split_once_unbracketed_colon,
+};
 
 pub(super) fn parameter_documentation(raw: &str) -> IndexMap<String, String> {
     let mut parameters = IndexMap::new();
@@ -180,7 +183,12 @@ fn is_underline(line: &str) -> bool {
 
 fn named_item_starts(line: &ParsedLine<'_>, following_lines: &[ParsedLine<'_>]) -> bool {
     let trimmed = line.text.trim();
-    split_type_separator(trimmed).is_some() || untyped_item_starts(trimmed, line, following_lines)
+    if let Some(separator) = parse_type_separator(trimmed) {
+        return !separator.requires_description_block
+            || has_indented_description(line, following_lines);
+    }
+
+    untyped_item_starts(trimmed, line, following_lines)
 }
 
 fn untyped_item_starts(
@@ -188,11 +196,7 @@ fn untyped_item_starts(
     line: &ParsedLine<'_>,
     following_lines: &[ParsedLine<'_>],
 ) -> bool {
-    is_item_name(trimmed)
-        && following_lines
-            .iter()
-            .find(|line| !line.text.trim().is_empty())
-            .is_some_and(|next| indentation(next.text) > indentation(line.text))
+    is_item_name(trimmed) && has_indented_description(line, following_lines)
 }
 
 fn return_item_starts(
@@ -201,19 +205,19 @@ fn return_item_starts(
     following_lines: &[ParsedLine<'_>],
 ) -> bool {
     let trimmed = line.text.trim();
-    split_type_separator(trimmed).is_some()
-        || (!previous_lines
-            .iter()
-            .any(|line| !line.text.trim().is_empty())
-            && is_anonymous_return_type(trimmed))
-        || (is_anonymous_return_type(trimmed)
-            && following_lines
-                .iter()
-                .find(|line| !line.text.trim().is_empty())
-                .is_some_and(|next| indentation(next.text) > indentation(line.text)))
+    if let Some(separator) = parse_type_separator(trimmed) {
+        return !separator.requires_description_block
+            || has_indented_description(line, following_lines);
+    }
+
+    (!previous_lines
+        .iter()
+        .any(|line| !line.text.trim().is_empty())
+        && is_anonymous_return_type(trimmed))
+        || (is_anonymous_return_type(trimmed) && has_indented_description(line, following_lines))
 }
 
-fn is_anonymous_return_type(line: &str) -> bool {
+pub(in crate::docstring) fn is_anonymous_return_type(line: &str) -> bool {
     !line.is_empty()
         && !line.ends_with('.')
         && !line.ends_with(':')
@@ -330,11 +334,18 @@ fn insert_parameter_group(
     }
 }
 
-fn split_type_separator(line: &str) -> Option<(&str, &str)> {
-    let (name, ty) = line.split_once(':')?;
-    if !name.chars().last().is_some_and(char::is_whitespace)
-        && !ty.chars().next().is_some_and(char::is_whitespace)
-    {
+pub(in crate::docstring) struct TypeSeparator<'a> {
+    pub(in crate::docstring) name: &'a str,
+    pub(in crate::docstring) ty: &'a str,
+    // Same-indent `name: type` is ambiguous with prose like `Note: deprecated`.
+    pub(in crate::docstring) requires_description_block: bool,
+}
+
+pub(in crate::docstring) fn parse_type_separator(line: &str) -> Option<TypeSeparator<'_>> {
+    let (name, ty) = split_once_unbracketed_colon(line)?;
+    let has_whitespace_before_colon = name.chars().last().is_some_and(char::is_whitespace);
+    let has_whitespace_after_colon = ty.chars().next().is_some_and(char::is_whitespace);
+    if !has_whitespace_before_colon && !has_whitespace_after_colon {
         return None;
     }
 
@@ -343,11 +354,25 @@ fn split_type_separator(line: &str) -> Option<(&str, &str)> {
     if !is_item_name(name) || ty.is_empty() {
         return None;
     }
+    if !has_whitespace_before_colon && !is_docstring_type_expression(ty) {
+        return None;
+    }
 
-    Some((name, ty))
+    Some(TypeSeparator {
+        name,
+        ty,
+        requires_description_block: !has_whitespace_before_colon,
+    })
 }
 
-fn is_item_name(name: &str) -> bool {
+fn has_indented_description(line: &ParsedLine<'_>, following_lines: &[ParsedLine<'_>]) -> bool {
+    following_lines
+        .iter()
+        .find(|line| !line.text.trim().is_empty())
+        .is_some_and(|next| indentation(next.text) > indentation(line.text))
+}
+
+pub(in crate::docstring) fn is_item_name(name: &str) -> bool {
     name.split(',').all(|part| {
         let part = part.trim();
         let part = part
