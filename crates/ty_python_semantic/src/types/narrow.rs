@@ -267,6 +267,10 @@ enum OriginalSubjectPreservation {
     TypeVariablesOnly,
 }
 
+/// Controls whether pattern success analysis also records the names bound by the pattern.
+///
+/// Subject narrowing only needs the type that reaches the case body. Binding inference uses the
+/// same structural walk, but also records the type assigned to each capture and alias.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PatternAnalysisMode {
     Bindings,
@@ -1342,12 +1346,17 @@ impl<'db> PatternSuccessAnalyzer<'db> {
         }
     }
 
+    /// Create an analyzer that computes only the type matched by the complete pattern.
     fn subject_only(db: &'db dyn Db, scope: ScopeId<'db>) -> Self {
         Self {
             db,
             scope,
             mode: PatternAnalysisMode::SubjectOnly,
         }
+    }
+
+    fn records_bindings(&self) -> bool {
+        self.mode == PatternAnalysisMode::Bindings
     }
 
     fn merge_binding(
@@ -1380,7 +1389,7 @@ impl<'db> PatternSuccessAnalyzer<'db> {
         place: ScopedPlaceId,
         binding: PatternBindingTypes<'db>,
     ) {
-        if self.mode == PatternAnalysisMode::Bindings {
+        if self.records_bindings() {
             Self::merge_binding(bindings, place, binding);
         }
     }
@@ -1433,7 +1442,8 @@ impl<'db> PatternSuccessAnalyzer<'db> {
                     },
                     |pattern| self.analyze_successful_pattern(pattern, subject_ty),
                 );
-                if !result.matched_subject_ty.is_never()
+                if self.records_bindings()
+                    && !result.matched_subject_ty.is_never()
                     && let Some(place) = name
                         .as_ref()
                         .and_then(|name| self.places().symbol_id(name.as_str()))
@@ -1448,9 +1458,10 @@ impl<'db> PatternSuccessAnalyzer<'db> {
             }
             PatternPredicateKind::Star(name) => {
                 let mut bindings = BTreeMap::new();
-                if let Some(place) = name
-                    .as_ref()
-                    .and_then(|name| self.places().symbol_id(name.as_str()))
+                if self.records_bindings()
+                    && let Some(place) = name
+                        .as_ref()
+                        .and_then(|name| self.places().symbol_id(name.as_str()))
                 {
                     self.record_binding(
                         &mut bindings,
@@ -1912,10 +1923,11 @@ impl<'db> PatternSuccessAnalyzer<'db> {
                     Self::merge_bindings(&mut bindings, child.bindings);
                 }
 
-                if let Some(place) = kind
-                    .rest
-                    .as_ref()
-                    .and_then(|name| analyzer.places().symbol_id(name.as_str()))
+                if analyzer.records_bindings()
+                    && let Some(place) = kind
+                        .rest
+                        .as_ref()
+                        .and_then(|name| analyzer.places().symbol_id(name.as_str()))
                 {
                     analyzer.record_binding(
                         &mut bindings,
