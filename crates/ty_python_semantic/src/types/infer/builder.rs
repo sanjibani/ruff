@@ -39,7 +39,7 @@ use crate::place::{
 };
 use crate::reachability::{ReachabilityEvaluationCache, evaluate_reachability_with_cache};
 use crate::types::add_inferred_python_version_hint_to_diagnostic;
-use crate::types::call::bind::MatchingOverloadIndex;
+use crate::types::call::bind::{ArgumentTypeContext, MatchingOverloadIndex};
 use crate::types::call::{Binding, Bindings, CallArguments, CallError, CallErrorKind};
 use crate::types::callable::{CallableFunctionProvenance, CallableTypeKind};
 use crate::types::class::{ClassLiteral, CodeGeneratorKind, MethodDecorator};
@@ -5676,7 +5676,9 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         call_expression_tcx: TypeContext<'db>,
     ) {
         fn add_overloads_from_binding<'a, 'db>(
-            overloads_with_binding: &mut Vec<(&'a Binding<'db>, &'a CallableBinding<'db>)>,
+            overloads_with_binding: &mut SmallVec<
+                [(&'a Binding<'db>, &'a CallableBinding<'db>); 1],
+            >,
             binding: &'a CallableBinding<'db>,
         ) {
             match binding.matching_overload_index() {
@@ -5698,47 +5700,183 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             }
         }
 
+        fn contains_type_form<'db>(db: &'db dyn Db, ty: Type<'db>) -> bool {
+            match ty.resolve_type_alias(db) {
+                Type::TypeForm(_) => true,
+                Type::Union(union) => union
+                    .elements(db)
+                    .iter()
+                    .any(|element| matches!(element.resolve_type_alias(db), Type::TypeForm(_))),
+                _ => false,
+            }
+        }
+
+        fn binary_expression_uses_type_context(binary: &ast::ExprBinOp) -> bool {
+            fn operand_uses_type_context(expression: &ast::Expr) -> bool {
+                match expression {
+                    ast::Expr::List(_)
+                    | ast::Expr::Tuple(_)
+                    | ast::Expr::Set(_)
+                    | ast::Expr::Dict(_)
+                    | ast::Expr::ListComp(_)
+                    | ast::Expr::SetComp(_)
+                    | ast::Expr::DictComp(_) => true,
+                    ast::Expr::BinOp(binary) => binary_expression_uses_type_context(binary),
+                    _ => false,
+                }
+            }
+
+            operand_uses_type_context(&binary.left) || operand_uses_type_context(&binary.right)
+        }
+
+        fn call_expression_uses_type_context(
+            builder: &TypeInferenceBuilder<'_, '_>,
+            call: &ast::ExprCall,
+        ) -> bool {
+            fn is_ordinary_callable<'db>(db: &'db dyn Db, ty: Type<'db>) -> bool {
+                match ty.resolve_type_alias(db) {
+                    Type::FunctionLiteral(_)
+                    | Type::BoundMethod(_)
+                    | Type::KnownBoundMethod(_)
+                    | Type::Callable(_)
+                    | Type::Dynamic(_)
+                    | Type::Divergent(_) => true,
+                    Type::Union(union) => union
+                        .elements(db)
+                        .iter()
+                        .all(|element| is_ordinary_callable(db, *element)),
+                    _ => false,
+                }
+            }
+
+            let db = builder.db();
+            let callable_type = builder.expression_type(&call.func);
+            if !is_ordinary_callable(db, callable_type) {
+                return true;
+            }
+
+            let Some(callables) = callable_type.try_upcast_to_callable(db) else {
+                return true;
+            };
+            let mut signatures = callables
+                .iter()
+                .flat_map(|callable| callable.signatures(db).overloads.iter());
+            let Some(signature) = signatures.next() else {
+                return true;
+            };
+
+            signatures.next().is_some()
+                || (signature.generic_context.is_some()
+                    && signature.return_ty.has_typevar_or_typevar_instance(db))
+        }
+
+        fn can_reuse_default_argument_type<'db>(
+            builder: &TypeInferenceBuilder<'db, '_>,
+            ast_argument: &ast::Expr,
+            default_ty: Type<'db>,
+            parameter_contexts: &[ArgumentTypeContext<'db>],
+        ) -> bool {
+            let db = builder.db();
+            match ast_argument {
+                ast::Expr::Name(_) | ast::Expr::Attribute(_) => {
+                    if matches!(
+                        default_ty.resolve_type_alias(db),
+                        Type::ClassLiteral(_) | Type::SubclassOf(_) | Type::TypeForm(_)
+                    ) {
+                        return false;
+                    }
+                }
+                ast::Expr::StringLiteral(_)
+                | ast::Expr::BytesLiteral(_)
+                | ast::Expr::NumberLiteral(_)
+                | ast::Expr::BooleanLiteral(_)
+                | ast::Expr::NoneLiteral(_)
+                | ast::Expr::EllipsisLiteral(_)
+                | ast::Expr::FString(_)
+                | ast::Expr::TString(_)
+                | ast::Expr::UnaryOp(_)
+                | ast::Expr::Compare(_)
+                | ast::Expr::Subscript(_)
+                | ast::Expr::Slice(_)
+                | ast::Expr::Named(_) => {}
+                ast::Expr::BinOp(binary) => {
+                    if binary_expression_uses_type_context(binary) {
+                        return false;
+                    }
+                }
+                ast::Expr::Call(call) => {
+                    if call_expression_uses_type_context(builder, call) {
+                        return false;
+                    }
+                }
+                _ => return false,
+            }
+
+            parameter_contexts.iter().all(|parameter_context| {
+                let context = parameter_context.type_context();
+                !context.is_typealias()
+                    && context
+                        .annotation
+                        .is_none_or(|annotation| !contains_type_form(db, annotation))
+            })
+        }
+
         let db = self.db();
         let constraints = ConstraintSetBuilder::new();
 
-        let mut overloads_with_binding: Vec<(&Binding<'db>, &CallableBinding<'db>)> = Vec::new();
+        let mut overloads_with_binding: SmallVec<[(&Binding<'db>, &CallableBinding<'db>); 1]> =
+            SmallVec::new();
 
         bindings.visit_type_context_callables(&mut |binding| {
             add_overloads_from_binding(&mut overloads_with_binding, binding);
         });
 
-        // A keyword argument matched to `**P.kwargs` can appear before the keyword argument that
-        // binds `P`, e.g. `wrapper(TagSet=[...], func=put_object)`. Seed those binder argument
-        // types first so the normal ParamSpec context path below is not source-order dependent.
-        for (argument_index, ast_argument) in ast_arguments.clone().enumerate() {
-            if ast_argument.is_variadic() {
-                continue;
-            }
-            let ast_argument = ast_argument.value();
-
-            let mut inferred_declared_types = FxHashSet::default();
-            for declared_type in overloads_with_binding
-                .iter()
-                .filter_map(|(overload, binding)| {
-                    overload.paramspec_binder_parameter_type(db, binding, argument_index)
-                })
-            {
-                if !inferred_declared_types.insert(declared_type) {
+        if overloads_with_binding.iter().any(|(overload, _)| {
+            overload
+                .signature
+                .parameters()
+                .as_paramspec_with_prefix()
+                .is_some()
+        }) {
+            // A keyword argument matched to `**P.kwargs` can appear before the keyword argument that
+            // binds `P`, e.g. `wrapper(TagSet=[...], func=put_object)`. Seed those binder argument
+            // types first so the normal ParamSpec context path below is not source-order dependent.
+            for (argument_index, ast_argument) in ast_arguments.clone().enumerate() {
+                if ast_argument.is_variadic() {
                     continue;
                 }
+                let ast_argument = ast_argument.value();
 
-                let mut speculative_builder = self.speculate();
-                let inferred_ty = infer_argument_ty(
-                    &mut speculative_builder,
-                    (
-                        argument_index,
-                        ast_argument,
-                        TypeContext::new(Some(declared_type)),
-                    ),
-                );
-                arguments_types.insert_type(argument_index, declared_type, inferred_ty);
+                let mut inferred_declared_types = FxHashSet::default();
+                for declared_type in
+                    overloads_with_binding
+                        .iter()
+                        .filter_map(|(overload, binding)| {
+                            overload.paramspec_binder_parameter_type(db, binding, argument_index)
+                        })
+                {
+                    if !inferred_declared_types.insert(declared_type) {
+                        continue;
+                    }
+
+                    let mut speculative_builder = self.speculate();
+                    let inferred_ty = infer_argument_ty(
+                        &mut speculative_builder,
+                        (
+                            argument_index,
+                            ast_argument,
+                            TypeContext::new(Some(declared_type)),
+                        ),
+                    );
+                    arguments_types.insert_type(argument_index, declared_type, inferred_ty);
+                }
             }
         }
+
+        let single_overload_with_binding = match overloads_with_binding.as_slice() {
+            [(overload, binding)] => Some((*overload, *binding)),
+            _ => None,
+        };
 
         for (argument_index, ast_argument) in ast_arguments.enumerate() {
             // Splatted arguments are inferred before parameter matching to
@@ -5764,7 +5902,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
 
             // If there is only a single binding and overload, we can infer the argument directly with
             // the unique parameter type annotation.
-            if let Ok((overload, binding)) = overloads_with_binding.iter().exactly_one() {
+            if let Some((overload, binding)) = single_overload_with_binding {
                 let parameter_context = parameter_tcx(overload, binding);
 
                 if let Some(parameter_context) = parameter_context {
@@ -5794,10 +5932,11 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                 }
             } else {
                 // Infer the type of each argument once with each distinct parameter type as type context.
-                let parameter_contexts: Vec<_> = overloads_with_binding
-                    .iter()
-                    .filter_map(|(overload, binding)| parameter_tcx(overload, binding))
-                    .collect();
+                let parameter_contexts: SmallVec<[ArgumentTypeContext<'db>; 4]> =
+                    overloads_with_binding
+                        .iter()
+                        .filter_map(|(overload, binding)| parameter_tcx(overload, binding))
+                        .collect();
 
                 // We perform inference once without any type context, emitting any diagnostics that are unrelated
                 // to bidirectional type inference.
@@ -5805,55 +5944,121 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                     infer_argument_ty(self, (argument_index, ast_argument, TypeContext::default()));
                 arguments_types.insert_type(argument_index, TypeContext::default(), default_ty);
 
-                let mut inferred_by_cache_key = FxHashMap::default();
+                if parameter_contexts.is_empty() {
+                    continue;
+                }
 
-                // Cache expressions inferred across speculative inference attempts.
-                //
-                // This is important to avoid exponential blowup for deeply nested generic calls,
-                // as inner expressions are repeatedly inferred with the same type context.
-                let teardown = self.setup_expression_cache();
-
-                for parameter_context in parameter_contexts {
-                    let inference_cache_key = parameter_context.inference_cache_key();
-                    if let Some(inferred_ty) =
-                        inferred_by_cache_key.get(&inference_cache_key).copied()
+                if can_reuse_default_argument_type(
+                    self,
+                    ast_argument,
+                    default_ty,
+                    &parameter_contexts,
+                ) {
+                    if matches!(ast_argument, ast::Expr::StringLiteral(_))
+                        && let Some(expected) = parameter_contexts
+                            .iter()
+                            .filter_map(|context| context.type_context().annotation)
+                            .filter(|expected| {
+                                self.has_string_literal_completion_candidates(*expected)
+                            })
+                            .reduce(|left, right| UnionType::from_two_elements(db, left, right))
                     {
-                        // Even when the inference cache key is identical, this overload may later
-                        // look up the inferred type through a different original `ParamSpec`
-                        // annotation, so insert through its own context.
+                        self.store_expected_type(ast_argument, expected);
+                    }
+
+                    for parameter_context in parameter_contexts {
+                        let inferred_ty = self.apply_literal_type_context(
+                            default_ty,
+                            parameter_context.type_context(),
+                        );
                         parameter_context.insert_inferred_type(
                             arguments_types,
                             argument_index,
                             inferred_ty,
                         );
-                        continue;
+                    }
+                    continue;
+                }
+
+                let [parameter_context] = parameter_contexts.as_slice() else {
+                    // Match the inline capacity of `parameter_contexts`; most arguments avoid both
+                    // allocating and hashing for this short-lived cache.
+                    let mut inferred_by_cache_key: SmallVec<[(Type<'db>, Type<'db>); 4]> =
+                        SmallVec::new();
+
+                    // Cache expressions inferred across speculative inference attempts.
+                    //
+                    // This is important to avoid exponential blowup for deeply nested generic calls,
+                    // as inner expressions are repeatedly inferred with the same type context.
+                    let teardown = self.setup_expression_cache();
+
+                    for parameter_context in parameter_contexts {
+                        let inference_cache_key = parameter_context.inference_cache_key();
+                        if let Some(inferred_ty) =
+                            inferred_by_cache_key
+                                .iter()
+                                .find_map(|(cache_key, inferred_ty)| {
+                                    (*cache_key == inference_cache_key).then_some(*inferred_ty)
+                                })
+                        {
+                            // Even when the inference cache key is identical, this overload may later
+                            // look up the inferred type through a different original `ParamSpec`
+                            // annotation, so insert through its own context.
+                            parameter_context.insert_inferred_type(
+                                arguments_types,
+                                argument_index,
+                                inferred_ty,
+                            );
+                            continue;
+                        }
+
+                        // We use a speculative builder to silence any diagnostics emitted during multi-inference, as the
+                        // type context is only used as a hint to infer a more assignable argument type, and should not lead
+                        // to diagnostics for non-matching overloads.
+                        let mut speculative_builder = self.speculate();
+                        let inferred_ty = infer_argument_ty(
+                            &mut speculative_builder,
+                            (
+                                argument_index,
+                                ast_argument,
+                                parameter_context.type_context(),
+                            ),
+                        );
+
+                        inferred_by_cache_key.push((inference_cache_key, inferred_ty));
+                        self.union_expected_types(&speculative_builder.expected_types);
+                        parameter_context.insert_inferred_type(
+                            arguments_types,
+                            argument_index,
+                            inferred_ty,
+                        );
                     }
 
-                    // We use a speculative builder to silence any diagnostics emitted during multi-inference, as the
-                    // type context is only used as a hint to infer a more assignable argument type, and should not lead
-                    // to diagnostics for non-matching overloads.
-                    let mut speculative_builder = self.speculate();
-                    let inferred_ty = infer_argument_ty(
-                        &mut speculative_builder,
-                        (
-                            argument_index,
-                            ast_argument,
-                            parameter_context.type_context(),
-                        ),
-                    );
+                    if teardown {
+                        self.teardown_expression_cache();
+                    }
 
-                    inferred_by_cache_key.insert(inference_cache_key, inferred_ty);
-                    self.union_expected_types(&speculative_builder.expected_types);
-                    parameter_context.insert_inferred_type(
-                        arguments_types,
+                    continue;
+                };
+
+                // Avoid allocating a per-argument inference cache when only one context is
+                // available. There are no repeated speculative inferences to deduplicate.
+                let mut speculative_builder = self.speculate();
+                let inferred_ty = infer_argument_ty(
+                    &mut speculative_builder,
+                    (
                         argument_index,
-                        inferred_ty,
-                    );
-                }
+                        ast_argument,
+                        parameter_context.type_context(),
+                    ),
+                );
 
-                if teardown {
-                    self.teardown_expression_cache();
-                }
+                self.union_expected_types(&speculative_builder.expected_types);
+                parameter_context.insert_inferred_type(
+                    arguments_types,
+                    argument_index,
+                    inferred_ty,
+                );
             }
         }
     }
@@ -6023,6 +6228,21 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         self.infer_value_expression_impl(expression, tcx)
     }
 
+    fn apply_literal_type_context(&self, ty: Type<'db>, tcx: TypeContext<'db>) -> Type<'db> {
+        let db = self.db();
+        if let Type::LiteralValue(literal) = ty
+            && let Some(tcx) = tcx.annotation
+            && let literal_tcx @ (Type::Union(_) | Type::LiteralValue(_)) = tcx
+                .resolve_type_alias(db)
+                .filter_union(db, |ty| ty.as_literal_value().is_some())
+            && ty.is_assignable_to(db, literal_tcx)
+        {
+            Type::LiteralValue(literal.to_unpromotable())
+        } else {
+            ty
+        }
+    }
+
     /// Infer an expression without implicitly treating this root as a `TypeForm`.
     ///
     /// Child expressions still use their normal contextual inference, so the
@@ -6094,15 +6314,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         };
 
         // Avoid promoting explicitly annotated literal values.
-        if let Type::LiteralValue(literal) = ty
-            && let Some(tcx) = tcx.annotation
-            && let literal_tcx @ (Type::Union(_) | Type::LiteralValue(_)) = tcx
-                .resolve_type_alias(self.db())
-                .filter_union(self.db(), |ty| ty.as_literal_value().is_some())
-            && ty.is_assignable_to(self.db(), literal_tcx)
-        {
-            ty = Type::LiteralValue(literal.to_unpromotable());
-        }
+        ty = self.apply_literal_type_context(ty, tcx);
 
         if let Some(tcx) = tcx.annotation
             && let Some(collection_def) = self.index.unconstrained_collection_binding(expression)

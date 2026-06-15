@@ -545,6 +545,16 @@ def f7(y: object) -> object:
 x9 = f7(reveal_type(["Sheet1"]))  # revealed: list[str]
 reveal_type(x9)  # revealed: list[int | str]
 
+@overload
+def f8_binary(x: list[int | None], y: int) -> int: ...
+@overload
+def f8_binary(x: list[int | str], y: str) -> str: ...
+def f8_binary(x: object, y: object) -> object:
+    raise NotImplementedError
+
+# Binary expressions that contain collection literals still require contextual inference.
+reveal_type(f8_binary(2 * ([1] + [2]), int_or_str()))  # revealed: int | str
+
 def f8(xs: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(map(abspath, xs))
 
