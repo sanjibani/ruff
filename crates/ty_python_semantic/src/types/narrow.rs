@@ -1133,7 +1133,6 @@ impl<'db> PatternSuccessAnalyzer<'db> {
     }
 
     fn merge_binding(
-        &self,
         bindings: &mut BTreeMap<ScopedPlaceId, PatternBindingTypes<'db>>,
         place: ScopedPlaceId,
         binding: PatternBindingTypes<'db>,
@@ -1149,19 +1148,15 @@ impl<'db> PatternSuccessAnalyzer<'db> {
     }
 
     fn merge_bindings(
-        &self,
         into: &mut BTreeMap<ScopedPlaceId, PatternBindingTypes<'db>>,
         from: BTreeMap<ScopedPlaceId, PatternBindingTypes<'db>>,
     ) {
         for (place, binding) in from {
-            self.merge_binding(into, place, binding);
+            Self::merge_binding(into, place, binding);
         }
     }
 
-    fn demote_subject_bindings(
-        &self,
-        bindings: &mut BTreeMap<ScopedPlaceId, PatternBindingTypes<'db>>,
-    ) {
+    fn demote_subject_bindings(bindings: &mut BTreeMap<ScopedPlaceId, PatternBindingTypes<'db>>) {
         for binding in bindings.values_mut() {
             binding.demote_subject();
         }
@@ -1206,7 +1201,7 @@ impl<'db> PatternSuccessAnalyzer<'db> {
                     .as_ref()
                     .and_then(|name| self.places().symbol_id(name.as_str()))
                 {
-                    self.merge_binding(
+                    Self::merge_binding(
                         &mut result.bindings,
                         place.into(),
                         PatternBindingTypes::subject(result.matched_subject_ty),
@@ -1337,7 +1332,7 @@ impl<'db> PatternSuccessAnalyzer<'db> {
                 .build();
             let alternative = self.analyze_successful_pattern(pattern, remaining_subject_ty);
             matched_subject_types.add_in_place(alternative.matched_subject_ty);
-            self.merge_bindings(&mut bindings, alternative.bindings);
+            Self::merge_bindings(&mut bindings, alternative.bindings);
             previous_pattern = pattern;
         }
 
@@ -1455,8 +1450,8 @@ impl<'db> PatternSuccessAnalyzer<'db> {
                     return None;
                 }
                 matched_element_types.push(child.matched_subject_ty);
-                analyzer.demote_subject_bindings(&mut child.bindings);
-                analyzer.merge_bindings(&mut bindings, child.bindings);
+                Self::demote_subject_bindings(&mut child.bindings);
+                Self::merge_bindings(&mut bindings, child.bindings);
             }
             let matched_subject_ty = analyzer.successful_sequence_subject_type(
                 kind,
@@ -1555,7 +1550,7 @@ impl<'db> PatternSuccessAnalyzer<'db> {
             for (_, filtering_subject_ty) in arms {
                 if let Some(arm) = analyze_arm(self, filtering_subject_ty) {
                     matched_types.add_in_place(arm.matched_subject_ty);
-                    self.merge_bindings(&mut arm_bindings, arm.bindings);
+                    Self::merge_bindings(&mut arm_bindings, arm.bindings);
                 }
             }
 
@@ -1567,7 +1562,7 @@ impl<'db> PatternSuccessAnalyzer<'db> {
                     );
                 }
             }
-            self.merge_bindings(&mut bindings, arm_bindings);
+            Self::merge_bindings(&mut bindings, arm_bindings);
 
             matched_subject_types.add_in_place(
                 self.matched_subject_type_for_original(original_subject_ty, matched_types.build()),
