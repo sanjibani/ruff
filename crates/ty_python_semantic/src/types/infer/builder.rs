@@ -1941,7 +1941,8 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                     //  `with not_context_manager as a.x: ...
                     builder
                         .infer_standalone_expression(&item.context_expr, tcx)
-                        .enter(builder.db())
+                        .try_enter_with_mode(builder.db(), EvaluationMode::from_is_async(*is_async))
+                        .unwrap_or_else(|err| err.fallback_enter_type(builder.db()))
                 });
             } else {
                 // Call into the context expression inference to validate that it evaluates
@@ -5077,13 +5078,16 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             orelse,
             is_async,
         } = for_statement;
+        let mode = EvaluationMode::from_is_async(*is_async);
 
         self.infer_target(target, iter, &|builder, tcx| {
             // TODO: `infer_for_statement_definition` reports a diagnostic if `iter_ty` isn't iterable
             //  but only if the target is a name. We should report a diagnostic here if the target isn't a name:
             //  `for a.x in not_iterable: ...
             let iterable_type = builder.infer_standalone_expression(iter, tcx);
-            if let Some(element_type) = iterable_type.try_cycle_iter_projection(builder.db()) {
+            if let Some(element_type) =
+                iterable_type.try_cycle_iter_projection_with_mode(builder.db(), mode)
+            {
                 element_type
             } else if !*is_async
                 && let Some(element_type) = builder
@@ -5092,8 +5096,9 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                 element_type
             } else {
                 iterable_type
-                    .iterate(builder.db())
-                    .homogeneous_element_type(builder.db())
+                    .try_iterate_with_mode(builder.db(), mode)
+                    .map(|tuple| tuple.homogeneous_element_type(builder.db()))
+                    .unwrap_or_else(|err| err.fallback_element_type(builder.db()))
             }
         });
 
@@ -5122,7 +5127,11 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                 let iterable_type =
                     self.infer_standalone_expression(iterable, TypeContext::default());
 
-                if let Some(projected) = iterable_type.try_cycle_iter_projection(self.db()) {
+                let mode = EvaluationMode::from_is_async(for_stmt.is_async());
+
+                if let Some(projected) =
+                    iterable_type.try_cycle_iter_projection_with_mode(self.db(), mode)
+                {
                     projected
                 } else if !for_stmt.is_async()
                     && let Some(element_type) = self
@@ -5133,10 +5142,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                     element_type
                 } else {
                     iterable_type
-                        .try_iterate_with_mode(
-                            self.db(),
-                            EvaluationMode::from_is_async(for_stmt.is_async()),
-                        )
+                        .try_iterate_with_mode(self.db(), mode)
                         .map(|tuple| tuple.homogeneous_element_type(self.db()))
                         .unwrap_or_else(|err| {
                             err.report_diagnostic(&self.context, iterable_type, iterable.into());
