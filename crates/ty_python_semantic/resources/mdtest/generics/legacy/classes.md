@@ -101,6 +101,24 @@ class OuterClass(Generic[T]):
 
 # revealed: ty_extensions.GenericContext[T@OuterClass]
 reveal_type(generic_context(OuterClass))
+
+class ParamSpecOuterClass(Generic[P]):
+    # snapshot: shadowed-type-variable
+    class InnerClass(SingleParamSpec[P]): ...
+    # revealed: None
+    reveal_type(generic_context(InnerClass))
+```
+
+```snapshot
+error[shadowed-type-variable]: Generic class `InnerClass` uses ParamSpec `P` already bound by an enclosing scope
+  --> src/mdtest_snippet.py:64:7
+   |
+64 | class ParamSpecOuterClass(Generic[P]):
+   |       ------------------------------- ParamSpec `P` is bound in this enclosing scope
+65 |     # snapshot: shadowed-type-variable
+66 |     class InnerClass(SingleParamSpec[P]): ...
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `P` used in class definition here
+   |
 ```
 
 If you don't specialize a generic base class, we use the default specialization, which maps each
@@ -308,10 +326,10 @@ class GoodOrder(Generic[WithDefaultT1, WithDefaultT2]): ...
 # error: [invalid-generic-class] "Default of `WithDefaultT2` cannot reference later type parameter `WithDefaultT1`"
 class BadOrder(Generic[WithDefaultT2, WithDefaultT1]): ...
 
-WithDefaultU = TypeVar("WithDefaultU", default=int)
+WithDefaultU2 = TypeVar("WithDefaultU2", default=int)
 
 # error: [invalid-generic-class]
-class AlsoBadOrder(Generic[WithDefaultT2, WithDefaultT1, WithDefaultU]): ...
+class AlsoBadOrder(Generic[WithDefaultT2, WithDefaultT1, WithDefaultU2]): ...
 ```
 
 A type variable default cannot reference a type variable that is not a type parameter of the class:

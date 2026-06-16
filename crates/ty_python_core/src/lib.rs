@@ -263,8 +263,8 @@ pub enum EnclosingSnapshotResult<'map, 'db> {
 
 #[derive(Debug, PartialEq, Eq, Update, get_size2::GetSize)]
 struct DefinitionsByNode<'db> {
-    single: FxHashMap<DefinitionNodeKey, Definition<'db>>,
-    non_single: FxHashMap<DefinitionNodeKey, Box<[Definition<'db>]>>,
+    single: FrozenMap<DefinitionNodeKey, Definition<'db>>,
+    non_single: FrozenMap<DefinitionNodeKey, Box<[Definition<'db>]>>,
 }
 
 impl<'db> DefinitionsByNode<'db> {
@@ -285,10 +285,10 @@ impl<'db> DefinitionsByNode<'db> {
             }
         }
 
-        single.shrink_to_fit();
-        non_single.shrink_to_fit();
-
-        Self { single, non_single }
+        Self {
+            single: FrozenMap::from(single),
+            non_single: FrozenMap::from(non_single),
+        }
     }
 
     fn get(&self, key: DefinitionNodeKey) -> Option<&[Definition<'db>]> {
@@ -544,9 +544,9 @@ impl<'db> SemanticIndex<'db> {
         self.enclosing_lambda_statements.get(&lambda).copied()
     }
 
-    /// If this is a potentially constraining use of an unconstrained collection literal, returns
+    /// If this is a potentially constraining use of an unannotated collection literal, returns
     /// its definition.
-    pub fn unconstrained_collection_binding(
+    pub fn unannotated_collection_literal(
         &self,
         collection_use: &ast::Expr,
     ) -> Option<Definition<'db>> {

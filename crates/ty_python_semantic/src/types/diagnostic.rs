@@ -30,7 +30,7 @@ use crate::types::{
     ProtocolInstanceType, SpecialFormType, SubclassOfInner, Type, TypeContext, TypeVarVariance,
     binding_type, protocol_class::ProtocolClass,
 };
-use crate::types::{KnownInstanceType, MemberLookupPolicy, TypedDictType, UnionType};
+use crate::types::{KnownInstanceType, MemberLookupPolicy, TypeVarKind, TypedDictType, UnionType};
 use crate::{Db, DisplaySettings, FxIndexMap, Program, declare_lint};
 use itertools::Itertools;
 use ruff_db::source::source_text;
@@ -497,8 +497,14 @@ declare_lint! {
     /// Checks for invalid applications of the `@dataclass` decorator.
     ///
     /// ## Why is this bad?
+    /// Applying `@dataclass` with incompatible arguments raises an exception while creating the
+    /// class:
+    ///
+    /// - `order=True` with `eq=False`
+    /// - `weakref_slot=True` with `slots=False`
+    ///
     /// Applying `@dataclass` to a class that inherits from `NamedTuple`, `TypedDict`,
-    /// `Enum`, or `Protocol` is invalid:
+    /// `Enum`, or `Protocol` is also invalid:
     ///
     /// - `NamedTuple` and `TypedDict` classes will raise an exception at runtime when
     ///   instantiating the class.
@@ -510,12 +516,16 @@ declare_lint! {
     /// from dataclasses import dataclass
     /// from typing import NamedTuple
     ///
+    /// @dataclass(order=True, eq=False)  # error: [invalid-dataclass]
+    /// class Ordered: ...
+    ///
     /// @dataclass  # error: [invalid-dataclass]
     /// class Foo(NamedTuple):
     ///     x: int
     /// ```
     ///
     /// [explicitly not supported]: https://docs.python.org/3/howto/enum.html#dataclass-support
+    /// See: <https://docs.python.org/3/library/dataclasses.html#dataclasses.dataclass>
     pub(crate) static INVALID_DATACLASS = {
         summary: "detects invalid `@dataclass` applications",
         status: LintStatus::stable("0.0.12"),
@@ -3006,10 +3016,15 @@ declare_lint! {
 
 declare_lint! {
     /// ## What it does
-    /// Checks for step size 0 in slices.
+    /// Checks for a step size of zero in slices when the operation is known to fail.
     ///
     /// ## Why is this bad?
-    /// A slice with a step size of zero will raise a `ValueError` at runtime.
+    /// Python's built-in sequence types raise a `ValueError` when sliced with a step size of zero.
+    ///
+    /// ## Known problems
+    /// This check is not exhaustive. It reports zero-step slices for certain built-in sequence
+    /// types where the operation is known to fail. A custom `__getitem__` implementation can
+    /// accept or reject such a slice, so ty cannot detect every runtime failure.
     ///
     /// ## Examples
     /// ```python
@@ -5922,17 +5937,25 @@ pub(crate) fn report_shadowed_type_variable<'db>(
     kind: &str,
     name: &ast::name::Name,
     range: TextRange,
+    type_var_kind: TypeVarKind,
     other_typevar: BoundTypeVarInstance<'db>,
 ) {
     let db = context.db();
     let Some(builder) = context.report_lint(&SHADOWED_TYPE_VARIABLE, range) else {
         return;
     };
+    let typevar_kind = match type_var_kind {
+        TypeVarKind::LegacyTypeVar
+        | TypeVarKind::Pep695TypeVar
+        | TypeVarKind::TypingSelf
+        | TypeVarKind::Pep613Alias => "type variable",
+        TypeVarKind::LegacyParamSpec | TypeVarKind::Pep695ParamSpec => "ParamSpec",
+    };
     let mut diagnostic = builder.into_diagnostic(format_args!(
-        "Generic {kind} `{name}` uses type variable `{typevar_name}` already bound by an enclosing scope",
+        "Generic {kind} `{name}` uses {typevar_kind} `{typevar_name}` already bound by an enclosing scope",
     ));
     diagnostic.set_concise_message(format_args!(
-        "Generic {kind} `{name}` uses type variable `{typevar_name}` already bound by an enclosing scope",
+        "Generic {kind} `{name}` uses {typevar_kind} `{typevar_name}` already bound by an enclosing scope",
     ));
     diagnostic.set_primary_message(format_args!(
         "`{typevar_name}` used in {kind} definition here"
@@ -5945,9 +5968,15 @@ pub(crate) fn report_shadowed_type_variable<'db>(
         Type::FunctionLiteral(function) => function.spans(db).signature,
         _ => return,
     };
-    diagnostic.annotate(Annotation::secondary(span).message(format_args!(
-        "Type variable `{typevar_name}` is bound in this enclosing scope",
-    )));
+    if other_typevar.is_paramspec(db) {
+        diagnostic.annotate(Annotation::secondary(span).message(format_args!(
+            "ParamSpec `{typevar_name}` is bound in this enclosing scope"
+        )));
+    } else {
+        diagnostic.annotate(Annotation::secondary(span).message(format_args!(
+            "Type variable `{typevar_name}` is bound in this enclosing scope"
+        )));
+    }
 }
 
 // I tried refactoring this function to placate Clippy,

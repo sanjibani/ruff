@@ -16,12 +16,11 @@ use crate::error::{
     ComprehensionUnpackingKind, FStringKind, StarTupleKind, UnparenthesizedNamedExprKind,
 };
 use crate::parser::progress::ParserProgress;
-use crate::parser::{FunctionKind, Parser, helpers};
+use crate::parser::{FunctionKind, IpyEscapeContext, Parser, helpers};
 use crate::string::{
     InterpolatedStringKind, StringType, parse_interpolated_string_literal_element,
     parse_string_literal,
 };
-use crate::token::TokenValue;
 use crate::token_set::TokenSet;
 use crate::{
     InterpolatedStringErrorType, Mode, ParseErrorType, UnsupportedSyntaxError,
@@ -573,9 +572,7 @@ impl<'src> Parser<'src> {
         let range = self.current_token_range();
 
         if self.at(TokenKind::Name) {
-            let TokenValue::Name(name) = self.bump_value(TokenKind::Name) else {
-                unreachable!();
-            };
+            let name = self.bump_name();
             return ast::Identifier {
                 id: name,
                 range,
@@ -651,9 +648,7 @@ impl<'src> Parser<'src> {
 
         let lhs = match self.current_token_kind() {
             TokenKind::Float => {
-                let TokenValue::Float(value) = self.bump_value(TokenKind::Float) else {
-                    unreachable!()
-                };
+                let value = self.bump_float();
 
                 Expr::NumberLiteral(ast::ExprNumberLiteral {
                     value: Number::Float(value),
@@ -662,9 +657,7 @@ impl<'src> Parser<'src> {
                 })
             }
             TokenKind::Complex => {
-                let TokenValue::Complex { real, imag } = self.bump_value(TokenKind::Complex) else {
-                    unreachable!()
-                };
+                let (real, imag) = self.bump_complex();
                 Expr::NumberLiteral(ast::ExprNumberLiteral {
                     value: Number::Complex { real, imag },
                     range: self.node_range(start),
@@ -672,9 +665,7 @@ impl<'src> Parser<'src> {
                 })
             }
             TokenKind::Int => {
-                let TokenValue::Int(value) = self.bump_value(TokenKind::Int) else {
-                    unreachable!()
-                };
+                let value = self.bump_int();
                 Expr::NumberLiteral(ast::ExprNumberLiteral {
                     value: Number::Int(value),
                     range: self.node_range(start),
@@ -792,7 +783,7 @@ impl<'src> Parser<'src> {
     ///
     /// See: <https://docs.python.org/3/reference/expressions.html#calls>
     pub(super) fn parse_call_expression(&mut self, func: Expr, start: TextSize) -> ast::ExprCall {
-        let arguments = self.parse_arguments();
+        let arguments = self.parse_arguments(ArgumentsContext::Call);
 
         ast::ExprCall {
             func: Box::new(func),
@@ -809,7 +800,7 @@ impl<'src> Parser<'src> {
     /// If the parser isn't positioned at a `(` token.
     ///
     /// See: <https://docs.python.org/3/reference/expressions.html#grammar-token-python-grammar-argument_list>
-    pub(super) fn parse_arguments(&mut self) -> ast::Arguments {
+    pub(super) fn parse_arguments(&mut self, context: ArgumentsContext) -> ast::Arguments {
         let start = self.node_start();
         self.bump(TokenKind::Lpar);
 
@@ -945,10 +936,10 @@ impl<'src> Parser<'src> {
             range: self.node_range(start),
             node_index: AtomicNodeIndex::NONE,
             args: args.into_boxed_slice(),
-            keywords: keywords.into_boxed_slice(),
+            keywords: keywords.into(),
         };
 
-        self.validate_arguments(&arguments, has_trailing_comma);
+        self.validate_arguments(&arguments, has_trailing_comma, context);
 
         arguments
     }
@@ -1610,9 +1601,7 @@ impl<'src> Parser<'src> {
         let range = self.current_token_range();
         let flags = self.tokens.current_flags().as_any_string_flags();
 
-        let TokenValue::String(value) = self.bump_value(TokenKind::String) else {
-            unreachable!()
-        };
+        let value = self.bump_string_value();
 
         match parse_string_literal(value, flags, range) {
             Ok(string) => string,
@@ -1729,11 +1718,8 @@ impl<'src> Parser<'src> {
                     ),
                     tok if tok == middle_token_kind => {
                         let range = parser.current_token_range();
-                        let TokenValue::InterpolatedStringMiddle(value) =
-                            parser.bump_value(middle_token_kind)
-                        else {
-                            unreachable!()
-                        };
+                        let value = parser.current_token_text();
+                        parser.bump(middle_token_kind);
                         InterpolatedStringElement::Literal(
                             parse_interpolated_string_literal_element(value, flags, range)
                                 .unwrap_or_else(|lex_error| {
@@ -1868,9 +1854,7 @@ impl<'src> Parser<'src> {
                         TextRange::new(self.prev_token_end, conversion_flag_range.start()),
                     );
                 }
-                let TokenValue::Name(name) = self.bump_value(TokenKind::Name) else {
-                    unreachable!();
-                };
+                let name = self.bump_name();
                 match &*name {
                     "s" => ConversionFlag::Str,
                     "r" => ConversionFlag::Repr,
@@ -3080,11 +3064,7 @@ impl<'src> Parser<'src> {
     fn parse_ipython_escape_command_expression(&mut self) -> ast::ExprIpyEscapeCommand {
         let start = self.node_start();
 
-        let TokenValue::IpyEscapeCommand { value, kind } =
-            self.bump_value(TokenKind::IpyEscapeCommand)
-        else {
-            unreachable!()
-        };
+        let (value, kind) = self.bump_ipython_escape_command(IpyEscapeContext::Assignment);
 
         if !matches!(kind, IpyEscapeKind::Magic | IpyEscapeKind::Shell) {
             // This should never occur as the lexer won't allow it.
@@ -3105,11 +3085,15 @@ impl<'src> Parser<'src> {
         command
     }
 
-    /// Performs the following validations on the function call arguments:
+    /// Performs the following validations on the arguments:
     /// 1. There aren't any duplicate keyword argument
-    /// 2. If there are more than one argument (positional or keyword) or a single argument with a
-    ///    trailing comma, all generator expressions present should be parenthesized.
-    fn validate_arguments(&mut self, arguments: &ast::Arguments, has_trailing_comma: bool) {
+    /// 2. Generator expressions are parenthesized when required by the argument context.
+    fn validate_arguments(
+        &mut self,
+        arguments: &ast::Arguments,
+        has_trailing_comma: bool,
+        context: ArgumentsContext,
+    ) {
         let mut all_arg_names =
             FxHashSet::with_capacity_and_hasher(arguments.keywords.len(), FxBuildHasher);
 
@@ -3127,7 +3111,14 @@ impl<'src> Parser<'src> {
             }
         }
 
-        if has_trailing_comma || arguments.len() > 1 {
+        let generator_must_be_parenthesized = match context {
+            ArgumentsContext::Call => has_trailing_comma || arguments.len() > 1,
+            // CPython rejects an unparenthesized generator expression as a class base even though
+            // this restriction isn't specified in the class definition grammar.
+            ArgumentsContext::ClassDefinition => true,
+        };
+
+        if generator_must_be_parenthesized {
             for arg in &*arguments.args {
                 if let Some(ast::ExprGenerator {
                     range,
@@ -3149,6 +3140,20 @@ impl<'src> Parser<'src> {
             }
         }
     }
+}
+
+/// Identifies the syntactic context for an argument list.
+///
+/// Unlike calls, class definitions require a sole generator expression to be parenthesized:
+///
+/// ```python
+/// f(x for x in xs)
+/// class C((x for x in xs)): ...
+/// ```
+#[derive(Debug, Copy, Clone)]
+pub(super) enum ArgumentsContext {
+    Call,
+    ClassDefinition,
 }
 
 #[derive(Debug)]
