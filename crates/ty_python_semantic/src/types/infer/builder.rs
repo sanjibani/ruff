@@ -444,6 +444,10 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
     }
 
     fn extend_projection_evidence(&mut self, other: Option<ProjectionEvidenceSet<'db>>) {
+        // Function decorator inference does not store projection evidence in its result.
+        if matches!(self.region, InferenceRegion::FunctionDecorators(_)) {
+            return;
+        }
         self.projection_evidence =
             ProjectionEvidenceSet::merged(self.db(), self.projection_evidence, other);
     }
@@ -1304,7 +1308,6 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         let PlaceAndQualifiers {
             place: resolved_place,
             qualifiers,
-            ..
         } = place_and_quals;
 
         let declared_ty = if resolved_place.is_undefined() && !place.is_symbol() {
@@ -2840,7 +2843,6 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                                 PlaceAndQualifiers {
                                     place: Place::Defined(DefinedPlace { ty: attr_ty, .. }),
                                     qualifiers: _,
-                                    ..
                                 } => attr_ty.is_callable_type(),
                                 _ => false,
                             };
@@ -2883,7 +2885,10 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                 };
 
                 match meta_attr {
-                    meta_attr @ PlaceAndQualifiers { .. } if meta_attr.is_class_var() => {
+                    meta_attr @ PlaceAndQualifiers {
+                        place: _,
+                        qualifiers: _,
+                    } if meta_attr.is_class_var() => {
                         if emit_diagnostics
                             && let Some(builder) =
                                 self.context.report_lint(&INVALID_ATTRIBUTE_ACCESS, target)
@@ -2902,7 +2907,6 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                                 ty: meta_attr_ty, ..
                             }),
                         qualifiers,
-                        ..
                     } => {
                         // Resolve `Self` type variables to the concrete instance type.
                         let meta_attr_ty = meta_attr_ty.bind_self_typevars(db, object_ty);
@@ -2974,7 +2978,6 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                                             ..
                                         }),
                                     qualifiers,
-                                    ..
                                 } = fallback_attr
                                 {
                                     // Bind `Self` via MRO matching.
@@ -3018,7 +3021,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
 
                     PlaceAndQualifiers {
                         place: Place::Undefined,
-                        ..
+                        qualifiers: _,
                     } => {
                         if let Some(PlaceAndQualifiers {
                             place:
@@ -3028,7 +3031,6 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                                     ..
                                 }),
                             qualifiers,
-                            ..
                         }) = fallback_attr
                         {
                             // Bind `Self` via MRO matching.
@@ -3114,7 +3116,6 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                                 ty: meta_attr_ty, ..
                             }),
                         qualifiers,
-                        ..
                     } => {
                         if emit_diagnostics
                             && self.invalid_assignment_to_final_attribute(
@@ -3188,7 +3189,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                                         definedness: class_attr_boundness,
                                         ..
                                     }),
-                                ..
+                                qualifiers: _,
                             } = fallback_attr
                             {
                                 let class_attr_ty =
@@ -3221,7 +3222,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                     }
                     PlaceAndQualifiers {
                         place: Place::Undefined,
-                        ..
+                        qualifiers: _,
                     } => {
                         if let Some(PlaceAndQualifiers {
                             place:
@@ -3231,7 +3232,6 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                                     ..
                                 }),
                             qualifiers,
-                            ..
                         }) = fallback_attr
                         {
                             let class_attr_ty =
@@ -3493,7 +3493,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                             definedness: Definedness::AlwaysDefined,
                             ..
                         }),
-                    ..
+                    qualifiers: _,
                 }) = self
                     .assignment_attribute_members(object_ty, attribute)
                     .map(|(meta_attr, _)| meta_attr)
@@ -10955,10 +10955,11 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             index: _,
             region: _,
             cycle_recovery: _,
-            projection_evidence: _,
+            projection_evidence,
             qualifiers: _,
             type_expression_flags: _,
         } = self;
+        debug_assert!(projection_evidence.is_none());
         let diagnostics = context.finish();
 
         FunctionDecoratorInference {
