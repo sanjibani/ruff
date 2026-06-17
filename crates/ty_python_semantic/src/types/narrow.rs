@@ -1313,6 +1313,7 @@ impl<'db, 'ast> NarrowingConstraintsBuilder<'db, 'ast> {
 
     fn evaluate_expr_not_in(
         &self,
+        lhs_ty: Type<'db>,
         rhs_ty: Type<'db>,
         rhs_expr: Option<&ast::Expr>,
     ) -> Option<Type<'db>> {
@@ -1367,7 +1368,7 @@ impl<'db, 'ast> NarrowingConstraintsBuilder<'db, 'ast> {
             }
             ast::CmpOp::Is => Some(rhs_ty),
             ast::CmpOp::In => self.evaluate_expr_in(lhs_ty, rhs_ty, rhs_expr),
-            ast::CmpOp::NotIn => self.evaluate_expr_not_in(rhs_ty, rhs_expr),
+            ast::CmpOp::NotIn => self.evaluate_expr_not_in(lhs_ty, rhs_ty, rhs_expr),
             _ => None,
         }
     }
