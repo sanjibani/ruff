@@ -219,18 +219,6 @@ pub(crate) fn binding_type<'db>(db: &'db dyn Db, definition: Definition<'db>) ->
     inference.binding_type(definition)
 }
 
-/// Infer the type of a binding together with projection facts computed for cycle recovery.
-pub(crate) fn binding_type_with_projection_evidence<'db>(
-    db: &'db dyn Db,
-    definition: Definition<'db>,
-) -> (Type<'db>, Option<ProjectionEvidenceSet<'db>>) {
-    let inference = infer_definition_types(db, definition);
-    (
-        inference.binding_type(definition),
-        inference.projection_evidence(),
-    )
-}
-
 /// Infer the type of a declaration, returning `Rejected` if it is not valid.
 pub(crate) fn inferred_declaration<'db>(
     db: &'db dyn Db,
@@ -8266,7 +8254,6 @@ impl<'db> ModuleLiteralType<'db> {
                         ..place
                     }),
                     qualifiers: TypeQualifiers::FROM_MODULE_GETATTR,
-                    projection_evidence: None,
                 };
             }
         }
@@ -8322,7 +8309,6 @@ impl<'db> ModuleLiteralType<'db> {
                         ..defined
                     }),
                     qualifiers: place_and_qualifiers.qualifiers,
-                    projection_evidence: place_and_qualifiers.projection_evidence,
                 };
             }
         }

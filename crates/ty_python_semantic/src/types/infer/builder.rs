@@ -9328,8 +9328,6 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                 }
             });
 
-        self.extend_projection_evidence(resolved_after_fallback.projection_evidence);
-
         let ty =
             resolved_after_fallback.unwrap_with_diagnostic(db, |lookup_error| match lookup_error {
                 LookupError::Undefined(qualifiers) => {
@@ -9956,7 +9954,6 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                 ast::ExprRef::Attribute(attribute),
             );
             constraint_keys.extend(keys);
-            self.extend_projection_evidence(resolved.projection_evidence);
             if let Place::Defined(DefinedPlace {
                 ty,
                 definedness: Definedness::AlwaysDefined,
@@ -9969,7 +9966,6 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         let fallback_place = value_type.member(db, &attr.id).map_type(|ty| {
             self.narrow_expr_with_applicable_constraints(attribute, ty, &constraint_keys)
         });
-        self.extend_projection_evidence(fallback_place.projection_evidence);
 
         let attr_name = &attr.id;
         let resolved_type =
