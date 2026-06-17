@@ -29,8 +29,8 @@ pub(crate) use self::diagnostic::register_lints;
 pub use self::diagnostic::{TypeCheckDiagnostics, UNDEFINED_REVEAL, UNRESOLVED_REFERENCE};
 pub(crate) use self::infer::{
     InferredDeclaration, TypeContext, infer_complete_scope_types, infer_deferred_types,
-    infer_definition_types, infer_expression_type, infer_expression_types,
-    infer_same_file_expression_type, infer_scope_types, is_discarded_dict_key_assignment,
+    infer_definition_types, infer_expression_types, infer_same_file_expression_type,
+    infer_scope_types, is_discarded_dict_key_assignment,
 };
 pub(crate) use self::iteration::extract_fixed_length_iterable_element_types;
 pub use self::known_instance::KnownInstanceType;
@@ -168,6 +168,8 @@ mod definition;
 mod property_tests;
 mod subscript;
 
+pub(crate) use projection::ProjectionEvidenceSet;
+
 pub fn check_types(db: &dyn Db, file: File) -> Vec<Diagnostic> {
     let _span = tracing::trace_span!("check_types", ?file).entered();
     tracing::debug!("Checking file '{path}'", path = file.path(db));
@@ -215,6 +217,18 @@ pub fn check_types(db: &dyn Db, file: File) -> Vec<Diagnostic> {
 pub(crate) fn binding_type<'db>(db: &'db dyn Db, definition: Definition<'db>) -> Type<'db> {
     let inference = infer_definition_types(db, definition);
     inference.binding_type(definition)
+}
+
+/// Infer the type of a binding together with projection facts computed for cycle recovery.
+pub(crate) fn binding_type_with_projection_evidence<'db>(
+    db: &'db dyn Db,
+    definition: Definition<'db>,
+) -> (Type<'db>, Option<ProjectionEvidenceSet<'db>>) {
+    let inference = infer_definition_types(db, definition);
+    (
+        inference.binding_type(definition),
+        inference.projection_evidence(),
+    )
 }
 
 /// Infer the type of a declaration, returning `Rejected` if it is not valid.
@@ -1149,6 +1163,16 @@ impl<'db> Type<'db> {
         previous: Self,
         cycle: &salsa::Cycle,
     ) -> Self {
+        self.cycle_normalized_with_projection_evidence(db, previous, cycle, None)
+    }
+
+    pub(crate) fn cycle_normalized_with_projection_evidence(
+        self,
+        db: &'db dyn Db,
+        previous: Self,
+        cycle: &salsa::Cycle,
+        projection_evidence: Option<&projection::ProjectionEvidenceSet<'db>>,
+    ) -> Self {
         // When we encounter a salsa cycle, we want to avoid oscillating between two or more types
         // without converging on a fixed-point result. Most of the time, we union together the
         // types from each cycle iteration to ensure that our result is monotonic, even if we
@@ -1184,7 +1208,7 @@ impl<'db> Type<'db> {
             // this cycle, if any.
             UnionType::from_elements_cycle_recovery(db, [previous, self])
         }
-        .recursive_type_normalized(db, cycle)
+        .recursive_type_normalized_with_projection_evidence(db, cycle, projection_evidence)
     }
 
     pub fn is_none(&self, db: &'db dyn Db) -> bool {
@@ -2115,10 +2139,24 @@ impl<'db> Type<'db> {
     /// Then `tuple[tuple[Divergent, Literal[1]], Literal[1]]` is replaced with `tuple[Divergent, Literal[1]]` and the query converges.
     #[must_use]
     pub(crate) fn recursive_type_normalized(self, db: &'db dyn Db, cycle: &salsa::Cycle) -> Self {
+        self.recursive_type_normalized_with_projection_evidence(db, cycle, None)
+    }
+
+    #[must_use]
+    pub(crate) fn recursive_type_normalized_with_projection_evidence(
+        self,
+        db: &'db dyn Db,
+        cycle: &salsa::Cycle,
+        projection_evidence: Option<&projection::ProjectionEvidenceSet<'db>>,
+    ) -> Self {
         cycle.head_ids().fold(self, |ty, id| {
             let div = Type::divergent(id);
             let ty = ty
-                .try_projection_cycle_normalized(db, div.as_divergent().unwrap())
+                .try_projection_cycle_normalized(
+                    db,
+                    div.as_divergent().unwrap(),
+                    projection_evidence,
+                )
                 .unwrap_or(ty);
             ty.recursive_type_normalized_impl(db, div, false)
                 .unwrap_or(Type::divergent(id))
@@ -3115,6 +3153,7 @@ impl<'db> Type<'db> {
                     provenance,
                 }),
             qualifiers,
+            ..
         } = attribute
             && let Some(fallback) = ty.materialized_divergent_fallback()
         {
@@ -3149,6 +3188,7 @@ impl<'db> Type<'db> {
                         ..
                     }),
                 qualifiers: _,
+                ..
             } => (attribute, AttributeKind::DataDescriptor),
 
             PlaceAndQualifiers {
@@ -3161,6 +3201,7 @@ impl<'db> Type<'db> {
                         provenance: attribute_provenance,
                     }),
                 qualifiers,
+                ..
             } => (
                 union
                     .map_with_boundness(db, |elem| {
@@ -3197,6 +3238,7 @@ impl<'db> Type<'db> {
                         provenance: attribute_provenance,
                     }),
                 qualifiers,
+                ..
             } => (
                 if intersection.positive(db).is_empty() {
                     attribute
@@ -3230,6 +3272,7 @@ impl<'db> Type<'db> {
                         provenance,
                     }),
                 qualifiers: _,
+                ..
             } => {
                 if let Some((return_ty, attribute_kind)) =
                     attribute_ty.try_call_dunder_get(db, instance, owner)
@@ -3323,6 +3366,7 @@ impl<'db> Type<'db> {
             PlaceAndQualifiers {
                 place: meta_attr,
                 qualifiers: meta_attr_qualifiers,
+                ..
             },
             meta_attr_kind,
         ) = Self::try_call_dunder_get_on_attribute(
@@ -3335,6 +3379,7 @@ impl<'db> Type<'db> {
         let PlaceAndQualifiers {
             place: fallback,
             qualifiers: fallback_qualifiers,
+            ..
         } = fallback;
 
         match (meta_attr, meta_attr_kind, fallback) {
@@ -5325,6 +5370,7 @@ impl<'db> Type<'db> {
                         ..
                     }),
                 qualifiers: _,
+                ..
             } => member,
             member @ PlaceAndQualifiers {
                 place:
@@ -5333,12 +5379,14 @@ impl<'db> Type<'db> {
                         ..
                     }),
                 qualifiers: _,
+                ..
             } => member
                 .or_fall_back_to(db, custom_getattribute_result)
                 .or_fall_back_to(db, custom_getattr_result),
             PlaceAndQualifiers {
                 place: Place::Undefined,
                 qualifiers: _,
+                ..
             } => custom_getattribute_result().or_fall_back_to(db, custom_getattr_result),
         }
     }
@@ -8218,6 +8266,7 @@ impl<'db> ModuleLiteralType<'db> {
                         ..place
                     }),
                     qualifiers: TypeQualifiers::FROM_MODULE_GETATTR,
+                    projection_evidence: None,
                 };
             }
         }
@@ -8273,6 +8322,7 @@ impl<'db> ModuleLiteralType<'db> {
                         ..defined
                     }),
                     qualifiers: place_and_qualifiers.qualifiers,
+                    projection_evidence: place_and_qualifiers.projection_evidence,
                 };
             }
         }
