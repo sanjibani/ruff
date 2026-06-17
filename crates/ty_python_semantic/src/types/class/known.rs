@@ -97,6 +97,7 @@ pub enum KnownClass {
     NoneType, // Part of `types` for Python >= 3.10
     // Typing
     Awaitable,
+    Coroutine,
     Generator,
     AsyncGenerator,
     Deprecated,
@@ -263,6 +264,7 @@ impl KnownClass {
             | Self::Staticmethod
             | Self::Classmethod
             | Self::Awaitable
+            | Self::Coroutine
             | Self::Generator
             | Self::AsyncGenerator
             | Self::Deprecated
@@ -312,6 +314,7 @@ impl KnownClass {
             | KnownClass::Staticmethod
             | KnownClass::Classmethod
             | KnownClass::Awaitable
+            | KnownClass::Coroutine
             | KnownClass::Generator
             | KnownClass::AsyncGenerator
             | KnownClass::Deprecated
@@ -415,6 +418,7 @@ impl KnownClass {
             | KnownClass::Staticmethod
             | KnownClass::Classmethod
             | KnownClass::Awaitable
+            | KnownClass::Coroutine
             | KnownClass::Generator
             | KnownClass::AsyncGenerator
             | KnownClass::Deprecated
@@ -518,6 +522,7 @@ impl KnownClass {
             | KnownClass::Staticmethod
             | KnownClass::Classmethod
             | KnownClass::Awaitable
+            | KnownClass::Coroutine
             | KnownClass::Generator
             | KnownClass::AsyncGenerator
             | KnownClass::Deprecated
@@ -613,6 +618,7 @@ impl KnownClass {
             | Self::TyExtensionsIterator
             | Self::AsyncIterator
             | Self::Awaitable
+            | Self::Coroutine
             | Self::NamedTupleLike
             | Self::AsyncGenerator
             | Self::Generator => true,
@@ -765,6 +771,7 @@ impl KnownClass {
             | KnownClass::EllipsisType
             | KnownClass::NoneType
             | KnownClass::Awaitable
+            | KnownClass::Coroutine
             | KnownClass::Generator
             | KnownClass::AsyncGenerator
             | KnownClass::Deprecated
@@ -840,6 +847,7 @@ impl KnownClass {
             Self::Staticmethod => "staticmethod",
             Self::Classmethod => "classmethod",
             Self::Awaitable => "Awaitable",
+            Self::Coroutine => "Coroutine",
             Self::Generator => "Generator",
             Self::AsyncGenerator => "AsyncGenerator",
             Self::Deprecated => "deprecated",
@@ -1232,6 +1240,7 @@ impl KnownClass {
             | Self::WrapperDescriptorType => KnownModule::Types,
             Self::NoneType => KnownModule::Typeshed,
             Self::Awaitable
+            | Self::Coroutine
             | Self::Generator
             | Self::AsyncGenerator
             | Self::SpecialForm
@@ -1323,6 +1332,7 @@ impl KnownClass {
             | Self::Staticmethod
             | Self::Classmethod
             | Self::Awaitable
+            | Self::Coroutine
             | Self::Generator
             | Self::AsyncGenerator
             | Self::Deprecated
@@ -1449,6 +1459,7 @@ impl KnownClass {
             | Self::Staticmethod
             | Self::Classmethod
             | Self::Awaitable
+            | Self::Coroutine
             | Self::Generator
             | Self::AsyncGenerator
             | Self::Deprecated
@@ -1535,6 +1546,7 @@ impl KnownClass {
             "staticmethod" => &[Self::Staticmethod],
             "classmethod" => &[Self::Classmethod],
             "Awaitable" => &[Self::Awaitable],
+            "Coroutine" => &[Self::Coroutine],
             "Generator" => &[Self::Generator],
             "AsyncGenerator" => &[Self::AsyncGenerator],
             "deprecated" => &[Self::Deprecated],
@@ -1694,6 +1706,7 @@ impl KnownClass {
             | Self::TyExtensionsIterable
             | Self::TyExtensionsIterator
             | Self::Awaitable
+            | Self::Coroutine
             | Self::Generator
             | Self::AsyncGenerator
             | Self::Template
