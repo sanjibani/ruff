@@ -2666,6 +2666,16 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             attr_ty
         };
 
+        let class_attribute_write_type = |attr_ty: Type<'db>| -> Type<'db> {
+            if matches!(object_ty, Type::ClassLiteral(_))
+                && let Type::FunctionLiteral(function) = attr_ty
+            {
+                Type::Callable(function.into_callable_type(db))
+            } else {
+                attr_ty
+            }
+        };
+
         match object_ty {
             Type::Union(union) => {
                 let mut infer_value_ty = MultiInferenceGuard::new(infer_value_ty);
@@ -3204,6 +3214,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                             {
                                 let class_attr_ty =
                                     class_attr_ty.bind_self_typevars(db, class_attr_self_ty);
+                                let class_attr_ty = class_attribute_write_type(class_attr_ty);
                                 let value_ty = infer_value_ty
                                     .infer_silent(self, TypeContext::new(Some(class_attr_ty)));
                                 (
@@ -3246,6 +3257,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                         {
                             let class_attr_ty =
                                 class_attr_ty.bind_self_typevars(db, class_attr_self_ty);
+                            let class_attr_ty = class_attribute_write_type(class_attr_ty);
                             let value_ty =
                                 infer_value_ty(self, TypeContext::new(Some(class_attr_ty)));
                             if emit_diagnostics
