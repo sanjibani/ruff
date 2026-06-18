@@ -203,6 +203,12 @@ impl<'a, 'db> CallArguments<'a, 'db> {
         self.items.len()
     }
 
+    pub(crate) fn is_variadic(&self, index: usize) -> bool {
+        self.items.get(index).is_some_and(|argument| {
+            matches!(argument.argument, Argument::Variadic | Argument::Keywords)
+        })
+    }
+
     pub(crate) fn argument_types(&self, index: usize) -> Option<&CallArgumentTypes<'db>> {
         self.items.get(index).map(|item| &item.types)
     }

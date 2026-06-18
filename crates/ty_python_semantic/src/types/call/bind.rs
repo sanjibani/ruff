@@ -791,21 +791,37 @@ impl<'db> Bindings<'db> {
         db: &'db dyn Db,
         argument_count: usize,
     ) -> Vec<usize> {
-        let mut argument_indices = FxHashSet::default();
+        let mut generic_arguments = vec![false; argument_count];
+        let mut has_structural_generic_context = false;
 
         self.visit_type_context_callables(&mut |binding| {
             for (_, overload) in binding.matching_overloads() {
                 for argument_index in 0..argument_count {
-                    if overload.has_generic_argument_type_context(db, binding, argument_index) {
-                        argument_indices.insert(argument_index);
+                    match overload.generic_argument_type_context(db, binding, argument_index) {
+                        GenericArgumentTypeContext::None => {}
+                        GenericArgumentTypeContext::Bare => {
+                            generic_arguments[argument_index] = true;
+                        }
+                        GenericArgumentTypeContext::Structural => {
+                            generic_arguments[argument_index] = true;
+                            has_structural_generic_context = true;
+                        }
                     }
                 }
             }
         });
 
-        let mut argument_indices: Vec<_> = argument_indices.into_iter().collect();
-        argument_indices.sort_unstable();
-        argument_indices
+        // The initial contextual pass already applies the specialization of a bare type variable.
+        // Without a structural generic context, no specialization can change between rounds.
+        if !has_structural_generic_context {
+            return Vec::new();
+        }
+
+        generic_arguments
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, is_generic)| is_generic.then_some(index))
+            .collect()
     }
 
     /// Returns `true` if every element of the union contains an intersection element with a matching
@@ -5730,6 +5746,36 @@ struct ParamSpecArgumentContext<'a, 'call, 'db> {
     call_expression_tcx: TypeContext<'db>,
 }
 
+#[derive(Clone, Copy)]
+enum GenericArgumentTypeContext {
+    /// The argument has no context containing an inferable type variable.
+    None,
+    /// The argument's context is exactly a bare, non-`ParamSpec` type variable.
+    Bare,
+    /// The argument's context contains an inferable type variable inside another type, or is a
+    /// `ParamSpec` projection.
+    Structural,
+}
+
+fn collect_typevar_variances<'db>(
+    db: &'db dyn Db,
+    ty: Type<'db>,
+) -> FxHashMap<BoundTypeVarIdentity<'db>, TypeVarVariance> {
+    let mut variances = FxHashMap::default();
+    ty.visit_specialization(db, |ty, variance| {
+        let Type::TypeVar(typevar) = ty else {
+            return;
+        };
+        variances
+            .entry(typevar.identity(db))
+            .and_modify(|current: &mut TypeVarVariance| {
+                *current = current.join(variance);
+            })
+            .or_insert(variance);
+    });
+    variances
+}
+
 /// Binding information for one of the overloads of a callable.
 #[derive(Debug, Clone)]
 pub(crate) struct Binding<'db> {
@@ -5810,26 +5856,35 @@ impl<'db> Binding<'db> {
             .get(argument_index + usize::from(binding.bound_type.is_some()))
     }
 
-    /// Returns `true` if specializing this overload can change the type context for the given
-    /// source argument.
-    fn has_generic_argument_type_context(
+    /// Classifies how specializing this overload can change the type context for the given source
+    /// argument.
+    fn generic_argument_type_context(
         &self,
         db: &'db dyn Db,
         binding: &CallableBinding<'db>,
         argument_index: usize,
-    ) -> bool {
+    ) -> GenericArgumentTypeContext {
         let Some(generic_context) = self.signature.generic_context else {
-            return false;
+            return GenericArgumentTypeContext::None;
         };
         let Some(argument_match) = self.matched_argument_for_call_argument(binding, argument_index)
         else {
-            return false;
+            return GenericArgumentTypeContext::None;
         };
 
         let inferable_typevars = generic_context.inferable_typevars(db);
-        argument_match.parameters.iter().any(|parameter| {
+        let mut has_bare_context = false;
+        for parameter in &argument_match.parameters {
             let parameter_type = self.signature.parameters()[parameter.index].annotated_type();
-            any_over_type(db, parameter_type, false, |ty| {
+
+            if let Type::TypeVar(typevar) = parameter_type
+                && !typevar.is_paramspec(db)
+            {
+                has_bare_context |= typevar.identity(db).is_inferable(db, inferable_typevars);
+                continue;
+            }
+
+            if any_over_type(db, parameter_type, false, |ty| {
                 let Type::TypeVar(typevar) = ty else {
                     return false;
                 };
@@ -5839,8 +5894,16 @@ impl<'db> Binding<'db> {
                     typevar.identity(db)
                 };
                 identity.is_inferable(db, inferable_typevars)
-            })
-        })
+            }) {
+                return GenericArgumentTypeContext::Structural;
+            }
+        }
+
+        if has_bare_context {
+            GenericArgumentTypeContext::Bare
+        } else {
+            GenericArgumentTypeContext::None
+        }
     }
 
     /// Returns source argument indices matched to the `ParamSpec` component.
@@ -6114,18 +6177,7 @@ impl<'db> Binding<'db> {
             let return_ty = self
                 .normalized_constructor_return(db)
                 .unwrap_or(self.signature.return_ty);
-            let mut return_typevar_variance = FxHashMap::default();
-            return_ty.visit_specialization(db, |ty, variance| {
-                let Type::TypeVar(typevar) = ty else {
-                    return;
-                };
-                return_typevar_variance
-                    .entry(typevar.identity(db))
-                    .and_modify(|current: &mut TypeVarVariance| {
-                        *current = current.join(variance);
-                    })
-                    .or_insert(variance);
-            });
+            let mut return_typevar_variances = None;
 
             let mut return_type_solutions: FxHashMap<BoundTypeVarIdentity<'db>, Type<'db>> =
                 FxHashMap::default();
@@ -6180,20 +6232,30 @@ impl<'db> Binding<'db> {
                         .filter(|ty| !ty.has_dynamic(db))
                         .map(|ty| ty.promote(db));
 
-                    if let Some(return_ty) = return_type_solution {
-                        let inferred_is_covariant_refinement =
-                            inferred_solution.is_some_and(|inferred_ty| {
-                                return_typevar_variance
-                                    .get(&identity)
-                                    .is_some_and(|variance| variance.is_covariant())
-                                    && inferred_ty.is_assignable_to(db, return_ty)
-                            });
-                        if !inferred_is_covariant_refinement {
-                            return Some(return_ty);
+                    if let Some(return_solution) = return_type_solution
+                        && let Some(inferred_solution) = inferred_solution
+                        && inferred_solution.is_assignable_to(db, return_solution)
+                    {
+                        let variances = return_typevar_variances
+                            .get_or_insert_with(|| collect_typevar_variances(db, return_ty));
+                        if variances
+                            .get(&identity)
+                            .is_some_and(|variance| variance.is_covariant())
+                        {
+                            return Some(inferred_solution);
                         }
                     }
 
-                    Some(inferred_solution.unwrap_or(unspecialized))
+                    // A successful previous-round specialization already includes a
+                    // non-covariant return solution. It can be absent on the first round, or when
+                    // checking retried without the declared type after finding incompatible
+                    // arguments. For example, `result: list[int] = f("a")` retries with `T = str`,
+                    // but the return context still supplies `T = int` for the diagnostic pass.
+                    Some(
+                        return_type_solution
+                            .or(inferred_solution)
+                            .unwrap_or(unspecialized),
+                    )
                 }),
             );
 

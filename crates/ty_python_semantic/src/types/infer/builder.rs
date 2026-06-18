@@ -5645,13 +5645,24 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         }
 
         argument_types.clone_from(&baseline_argument_types);
-        self.infer_argument_types_to_fixpoint(
-            ast_arguments,
-            argument_types,
-            infer_argument_ty,
-            bindings,
-            call_expression_tcx,
-        );
+        if has_generic_context {
+            self.infer_argument_types_to_fixpoint(
+                ast_arguments,
+                argument_types,
+                infer_argument_ty,
+                bindings,
+                call_expression_tcx,
+            );
+        } else {
+            self.infer_all_argument_types(
+                ast_arguments,
+                argument_types,
+                &baseline_argument_types,
+                infer_argument_ty,
+                bindings,
+                call_expression_tcx,
+            );
+        }
 
         bindings.check_types_impl(
             db,
@@ -5674,14 +5685,9 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
     ) {
         let db = self.db();
         let baseline_argument_types = argument_types.clone();
-        let reinferable_arguments: Vec<_> = ast_arguments
-            .clone()
-            .map(|argument| !argument.is_variadic())
-            .collect();
         let mut generic_argument_indices =
             bindings.generic_context_argument_indices(db, argument_types.len());
-        generic_argument_indices
-            .retain(|&index| reinferable_arguments.get(index).copied().unwrap_or(false));
+        generic_argument_indices.retain(|&index| !argument_types.is_variadic(index));
 
         if generic_argument_indices.is_empty() {
             self.infer_all_argument_types(
@@ -5697,14 +5703,14 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
 
         let mut context_argument_types = baseline_argument_types.clone();
         let mut context_bindings = bindings.clone();
-        let teardown = self.setup_expression_cache();
-        let speculative_builder = self.speculate();
 
-        // Reserve the final round for non-speculative inference below, which commits expression
-        // types and emits diagnostics once using the latest checked bindings.
-        for _ in 0..generic_argument_indices.len() {
+        // TODO: We could share an expression cache across speculative rounds if cached inference
+        // could retain diagnostics and replay them when the final round is committed. Until then,
+        // the final round must infer expressions instead of reusing cached results so that it
+        // emits every diagnostic once.
+        for round in 0..=generic_argument_indices.len() {
             let mut next_argument_types = baseline_argument_types.clone();
-            let mut round_builder = speculative_builder.speculate();
+            let mut round_builder = self.speculate();
             round_builder.infer_all_argument_types(
                 ast_arguments.clone(),
                 &mut next_argument_types,
@@ -5713,6 +5719,14 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                 &context_bindings,
                 call_expression_tcx,
             );
+
+            let converged = next_argument_types
+                .inferred_types_equal_at(&context_argument_types, &generic_argument_indices);
+            if converged || round == generic_argument_indices.len() {
+                argument_types.clone_from(&next_argument_types);
+                self.extend(round_builder);
+                return;
+            }
 
             let mut next_bindings = bindings.clone();
             let constraints = ConstraintSetBuilder::new();
@@ -5724,29 +5738,9 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                 &self.dataclass_field_specifiers,
             );
 
-            let converged = next_argument_types
-                .inferred_types_equal_at(&context_argument_types, &generic_argument_indices);
             context_argument_types = next_argument_types;
             context_bindings = next_bindings;
-
-            if converged {
-                break;
-            }
         }
-
-        if teardown {
-            self.teardown_expression_cache();
-        }
-
-        argument_types.clone_from(&baseline_argument_types);
-        self.infer_all_argument_types(
-            ast_arguments,
-            argument_types,
-            &context_argument_types,
-            infer_argument_ty,
-            &context_bindings,
-            call_expression_tcx,
-        );
     }
 
     /// Infer the argument types for all bindings.
