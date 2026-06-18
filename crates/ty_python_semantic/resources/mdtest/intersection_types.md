@@ -1339,5 +1339,55 @@ class Y(X):
 test(Y())
 ```
 
+## Intersections of invariant generics
+
+For any gradual type `G`, `Invariant[G] & Invariant[Any] = Invariant[G]`.
+
+```py
+from typing import Any
+from ty_extensions import Unknown
+
+class P: ...
+class Q: ...
+
+class Invariant[T]:
+    value: T
+
+type InvariantAny = Invariant[Any]
+
+def _(
+    i1: Invariant[Any] & Invariant[P],
+    i2: Invariant[P] & Invariant[Any],
+    i3: InvariantAny & Invariant[P],
+    i4: Invariant[Unknown] & Invariant[P],
+    i5: Invariant[Any] & Q & Invariant[P],
+    i6: Invariant[P] & Q & Invariant[Any],
+) -> None:
+    reveal_type(i1)  # revealed: Invariant[P]
+    reveal_type(i2)  # revealed: Invariant[P]
+    reveal_type(i3)  # revealed: Invariant[P]
+    reveal_type(i4)  # revealed: Invariant[P]
+    reveal_type(i5)  # revealed: Q & Invariant[P]
+    reveal_type(i6)  # revealed: Invariant[P] & Q
+
+def _(
+    i1: list[Any] & list[int],
+    i2: dict[str, int] & dict[str, Any],
+    i3: dict[Any, str] & dict[int, str],
+    i4: dict[str, int] & dict[Any, Any],
+) -> None:
+    reveal_type(i1)  # revealed: list[int]
+    reveal_type(i2)  # revealed: dict[str, int]
+    reveal_type(i3)  # revealed: dict[int, str]
+    reveal_type(i4)  # revealed: dict[str, int]
+
+def _(
+    i1: list[Any] & list[Any | int],
+    i2: list[Any] & list[Any],
+) -> None:
+    reveal_type(i1)  # revealed: list[Any | int]
+    reveal_type(i2)  # revealed: list[Any]
+```
+
 [complement laws]: https://en.wikipedia.org/wiki/Complement_(set_theory)
 [de morgan's laws]: https://en.wikipedia.org/wiki/De_Morgan%27s_laws
