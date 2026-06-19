@@ -3474,6 +3474,52 @@ impl<'db> Type<'db> {
             policy: MemberLookupPolicy,
             receiver: Option<Type<'db>>,
         ) -> PlaceAndQualifiers<'db> {
+            fn instance_like_member_lookup<'db>(
+                db: &'db dyn Db,
+                this: Type<'db>,
+                name: &Name,
+                policy: MemberLookupPolicy,
+                receiver: Type<'db>,
+            ) -> PlaceAndQualifiers<'db> {
+                let name_str = name.as_str();
+
+                // Enum members can be accessed through enum instances and other enum members,
+                // e.g. `answer.YES` or `Answer.YES.NO`.
+                if let Some(enum_class) =
+                    this.nominal_class(db).map(|class| class.class_literal(db))
+                    && let Some(metadata) = enum_metadata(db, enum_class)
+                    && let Some(resolved_name) = metadata.resolve_member(name)
+                {
+                    return Place::bound(Type::enum_literal(EnumLiteralType::new(
+                        db,
+                        enum_class,
+                        resolved_name.clone(),
+                    )))
+                    .into();
+                }
+
+                let fallback = this.instance_member(db, name_str);
+
+                let result = this.invoke_descriptor_protocol(
+                    db,
+                    receiver,
+                    name_str,
+                    fallback,
+                    InstanceFallbackShadowsNonDataDescriptor::No,
+                    policy,
+                );
+
+                if result.is_class_var() && this.is_typed_dict() {
+                    // `ClassVar`s on `TypedDictFallback` cannot be accessed on inhabitants of `SomeTypedDict`.
+                    // They can only be accessed on `SomeTypedDict` directly.
+                    return Place::Undefined.into();
+                }
+
+                let result = this.fallback_to_getattr(db, name, result, policy);
+
+                result.map_type(|ty| ty.bind_self_typevars(db, receiver))
+            }
+
             tracing::trace!("member_lookup_with_policy: {}.{}", this.display(db), name);
             if let Some(fallback) = this.materialized_divergent_fallback() {
                 return fallback.member_lookup_with_policy_and_receiver(db, name, policy, receiver);
@@ -3805,14 +3851,23 @@ impl<'db> Type<'db> {
                 }
                 Type::TypeVar(typevar) => {
                     let receiver = receiver.unwrap_or(this);
-                    let bound = typevar
+                    if let Some(bound) = typevar
                         .typevar(db)
                         .bound_or_constraints(db)
-                        .map_or_else(Type::object, |bound| bound.as_type(db));
+                        .map(|bound| bound.as_type(db))
+                        && bound.to_instance(db).is_some()
+                    {
+                        // A TypeVar can be bounded by a class-object type such as `type[A]`, which
+                        // requires the full lookup path rather than instance-member lookup.
+                        return bound.member_lookup_with_policy_and_receiver(
+                            db,
+                            name,
+                            policy,
+                            Some(receiver),
+                        );
+                    }
 
-                    // Use the full lookup path because a TypeVar can be bounded by a class-object
-                    // type such as `type[A]`, not only by an instance-like type.
-                    bound.member_lookup_with_policy_and_receiver(db, name, policy, Some(receiver))
+                    instance_like_member_lookup(db, this, &name, policy, receiver)
                 }
 
                 Type::NominalInstance(instance)
@@ -3890,42 +3945,7 @@ impl<'db> Type<'db> {
                 | Type::TypeForm(..)
                 | Type::TypedDict(_) => {
                     let receiver = receiver.unwrap_or(this);
-
-                    // Enum members can be accessed through enum instances and other enum members,
-                    // e.g. `answer.YES` or `Answer.YES.NO`.
-                    if let Some(enum_class) =
-                        this.nominal_class(db).map(|class| class.class_literal(db))
-                        && let Some(metadata) = enum_metadata(db, enum_class)
-                        && let Some(resolved_name) = metadata.resolve_member(&name)
-                    {
-                        return Place::bound(Type::enum_literal(EnumLiteralType::new(
-                            db,
-                            enum_class,
-                            resolved_name.clone(),
-                        )))
-                        .into();
-                    }
-
-                    let fallback = this.instance_member(db, name_str);
-
-                    let result = this.invoke_descriptor_protocol(
-                        db,
-                        receiver,
-                        name_str,
-                        fallback,
-                        InstanceFallbackShadowsNonDataDescriptor::No,
-                        policy,
-                    );
-
-                    if result.is_class_var() && this.is_typed_dict() {
-                        // `ClassVar`s on `TypedDictFallback` cannot be accessed on inhabitants of `SomeTypedDict`.
-                        // They can only be accessed on `SomeTypedDict` directly.
-                        return Place::Undefined.into();
-                    }
-
-                    let result = this.fallback_to_getattr(db, &name, result, policy);
-
-                    result.map_type(|ty| ty.bind_self_typevars(db, receiver))
+                    instance_like_member_lookup(db, this, &name, policy, receiver)
                 }
 
                 Type::ClassLiteral(..) | Type::GenericAlias(..) | Type::SubclassOf(..) => {
