@@ -7135,13 +7135,14 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                 .variables(self.db())
                 .map(|typevar| {
                     let identity = typevar.identity(self.db());
-                    // Keep this parallel with the slow path below: a covariant context provides
-                    // only an upper bound, which does not determine the specialization for an empty
-                    // literal. A contravariant context provides a lower bound, for which inference
-                    // selects the narrowest valid solution.
+                    // Keep this parallel with the slow path below: when elements provide more
+                    // specific constraints, a covariant context should not widen their inferred
+                    // type. For an empty literal, the contextual upper bound is the only available
+                    // information, so use it as the specialization.
                     if elt_tcx_variance
                         .get(&identity)
                         .is_some_and(|variance| variance.is_covariant())
+                        && !elts.is_empty()
                     {
                         return None;
                     }
@@ -7213,13 +7214,15 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             }
 
             // Avoid unnecessarily widening the return type based on a covariant
-            // type parameter from the type context.
+            // type parameter from the type context when literal elements provide
+            // more specific constraints. Empty literals have no such constraints.
             //
             // Note that we also avoid unioning  the inferred type with `Unknown` in this
             // case, which is only necessary for invariant collections.
             if elt_tcx_variance
                 .get(&elt_ty_identity)
                 .is_some_and(|variance| variance.is_covariant())
+                && !elts.is_empty()
             {
                 continue;
             }

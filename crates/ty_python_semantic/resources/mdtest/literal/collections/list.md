@@ -6,6 +6,17 @@
 reveal_type([])  # revealed: list[Unknown]
 ```
 
+An empty list uses the element type from a covariant type context:
+
+```py
+from collections.abc import Sequence
+
+def default_to_empty(items: Sequence[int] | None = None) -> None:
+    if items is None:
+        items = reveal_type([])  # revealed: list[int]
+    reveal_type(items)  # revealed: Sequence[int]
+```
+
 ## List of tuples
 
 ```py
