@@ -399,7 +399,12 @@ impl<'a> ResponseWriter<'a> {
             .map(|doc| doc.version())
             .ok();
 
-        let result_id = Diagnostics::result_id_from_hash(diagnostics, unnecessary_hints);
+        let result_id = Diagnostics::result_id_from_hash(
+            db,
+            diagnostics,
+            unnecessary_hints,
+            self.client_capabilities,
+        );
 
         let previous_result_id = self.previous_result_ids.remove(&key).map(|(_uri, id)| id);
 
@@ -415,22 +420,19 @@ impl<'a> ResponseWriter<'a> {
                     },
                 )
             }
-            new_id => {
-                let mut lsp_diagnostics = diagnostics
-                    .iter()
-                    .filter_map(|diagnostic| {
-                        Some(
-                            to_lsp_diagnostic(
-                                db,
-                                diagnostic,
-                                self.position_encoding,
-                                self.client_capabilities,
-                                self.global_settings,
-                            )?
-                            .1,
-                        )
-                    })
-                    .collect::<Vec<_>>();
+            result_id => {
+                let mut lsp_diagnostics = Vec::with_capacity(diagnostics.len());
+                for diagnostic in diagnostics {
+                    if let Some((_, diagnostic)) = to_lsp_diagnostic(
+                        db,
+                        diagnostic,
+                        self.position_encoding,
+                        self.client_capabilities,
+                        self.global_settings,
+                    ) {
+                        lsp_diagnostics.push(diagnostic);
+                    }
+                }
                 lsp_diagnostics.extend(unnecessary_hints_to_lsp_diagnostics(
                     db,
                     file,
@@ -443,7 +445,7 @@ impl<'a> ResponseWriter<'a> {
                         uri,
                         version,
                         full_document_diagnostic_report: FullDocumentDiagnosticReport {
-                            result_id: new_id,
+                            result_id,
                             items: lsp_diagnostics,
                         },
                     },
@@ -488,7 +490,7 @@ impl<'a> ResponseWriter<'a> {
             clippy::iter_over_hash_type,
             reason = "workspace diagnostic reports are independently identified by URI"
         )]
-        for (key, (previous_uri, previous_result_id)) in self.previous_result_ids {
+        for (key, (previous_uri, _)) in self.previous_result_ids {
             // This file had diagnostics before but doesn't now, so we need to report it as having no diagnostics
             let version = self
                 .index
@@ -496,31 +498,15 @@ impl<'a> ResponseWriter<'a> {
                 .ok()
                 .map(crate::session::index::Document::version);
 
-            let new_result_id = Diagnostics::result_id_from_hash(&[], &[]);
-
-            let report = match new_result_id {
-                Some(new_id) if new_id == previous_result_id => {
-                    WorkspaceUnchangedDocumentDiagnosticReport {
-                        uri: previous_uri,
-                        version,
-                        unchanged_document_diagnostic_report: UnchangedDocumentDiagnosticReport {
-                            result_id: new_id,
-                        },
-                    }
-                    .into()
-                }
-                new_id => {
-                    WorkspaceFullDocumentDiagnosticReport {
-                        uri: previous_uri,
-                        version,
-                        full_document_diagnostic_report: FullDocumentDiagnosticReport {
-                            result_id: new_id,
-                            items: vec![], // No diagnostics
-                        },
-                    }
-                    .into()
-                }
-            };
+            let report = WorkspaceFullDocumentDiagnosticReport {
+                uri: previous_uri,
+                version,
+                full_document_diagnostic_report: FullDocumentDiagnosticReport {
+                    result_id: None,
+                    items: vec![],
+                },
+            }
+            .into();
 
             items.push(report);
         }
