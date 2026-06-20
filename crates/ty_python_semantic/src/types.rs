@@ -6930,12 +6930,12 @@ impl<'db> Type<'db> {
                 | DynamicType::UnknownGeneric(_)
                 | DynamicType::AmbiguousOverload,
             ) => Type::SpecialForm(SpecialFormType::Unknown).definition(db),
+            Self::Divergent(_) => Type::SpecialForm(SpecialFormType::Divergent).definition(db),
             Self::AlwaysTruthy => Type::SpecialForm(SpecialFormType::AlwaysTruthy).definition(db),
             Self::AlwaysFalsy => Type::SpecialForm(SpecialFormType::AlwaysFalsy).definition(db),
 
             // These types have no definition
-            Self::Divergent(_)
-            | Self::Projection(_)
+            Self::Projection(_)
             | Self::Dynamic(
                 DynamicType::Todo(_)
                 | DynamicType::TodoUnpack
